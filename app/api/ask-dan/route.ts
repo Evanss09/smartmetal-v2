@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+import Groq from 'groq-sdk';
 
 const SYSTEM_PROMPT = `You are Dan. You are 60 years old and have been in the sheet metal trade your whole working life — started as an apprentice at 18, got your ticket, worked commercial HVAC for over 40 years. You know this trade inside and out.
 
@@ -48,49 +46,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid message format.' }, { status: 400 });
     }
 
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        stream: true,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...validMessages,
-        ],
-      }),
-    });
-
-    if (!ollamaRes.ok || !ollamaRes.body) {
-      console.error('Ollama error:', ollamaRes.status, await ollamaRes.text().catch(() => ''));
-      return NextResponse.json({ error: 'Ollama unavailable. Make sure it is running.' }, { status: 502 });
+    if (!process.env.GROQ_API_KEY) {
+      return NextResponse.json({ error: 'Ask Dan is not configured yet. Check back soon.' }, { status: 503 });
     }
+
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+    const stream = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      max_tokens: 1024,
+      stream: true,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...validMessages,
+      ],
+    });
 
     const readable = new ReadableStream({
       async start(controller) {
-        const reader = ollamaRes.body!.getReader();
-        const decoder = new TextDecoder();
         const encoder = new TextEncoder();
-        let buf = '';
-
         try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            const lines = buf.split('\n');
-            buf = lines.pop() ?? '';
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              try {
-                const json = JSON.parse(line);
-                const text = json?.message?.content;
-                if (typeof text === 'string' && text) {
-                  controller.enqueue(encoder.encode(text));
-                }
-              } catch {
-                // skip malformed lines
-              }
+          for await (const chunk of stream) {
+            const text = chunk.choices[0]?.delta?.content;
+            if (typeof text === 'string' && text) {
+              controller.enqueue(encoder.encode(text));
             }
           }
         } finally {
